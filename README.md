@@ -1,5 +1,6 @@
 # `mdns-sd-discovery`
 
+[![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/mdns-sd-discovery/main)](https://github.com/abbyssoul/mdns-sd-discovery/actions/workflows/ci-test.yml)
 [![Crates.io](https://img.shields.io/crates/v/mdns-sd-discovery.svg)](https://crates.io/crates/mdns-sd-discovery)
 [![Documentation](https://docs.rs/mdns-sd-discovery/badge.svg)](https://docs.rs/mdns-sd-discovery)
 [![License: MIT](https://img.shields.io/crates/l/mdns-sd-discovery.svg)](LICENSE)
