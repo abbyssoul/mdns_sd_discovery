@@ -1,0 +1,35 @@
+[package]
+name = "mdns-sd-discovery"
+version = "0.1.0"
+edition = "2024"
+categories = ["network-programming"]
+keywords = ["dns-sd", "mdns", "zeroconf", "bonjour", "avahi"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/abbyssoul/mdns_sd_discovery"
+homepage = "https://github.com/abbyssoul/mdns_sd_discovery"
+documentation = "https://docs.rs/mdns-sd-discovery"
+description = "Async wrapper for native DNS-SD/mDNS service discovery"
+
+[dependencies]
+log = "0.4.29"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_NetworkManagement_Dns"] }
+widestring = "1.2.1"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+futures-util = "0.3.32"
+zbus = { version = "5.15.0", features = ["tokio"] }
+
+[dev-dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+env_logger = "0.11.10"
+hex = "0.4.3"
+network-interface = "2"
+tokio = { version = "1.52.3", features = ["rt", "macros", "rt-multi-thread", "time", "signal"] }
