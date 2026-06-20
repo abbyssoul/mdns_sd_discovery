@@ -74,11 +74,11 @@ pub(crate) async fn browse_start(
 
 /// Subscribes to all signals of `interface` on a freshly created, dedicated
 /// connection *before* any browser object is created, so the initial burst of
-/// cached-entry signals is not missed. Returns the connection, an Avahi server
-/// proxy on it, and the message stream.
+/// cached-entry signals is not missed. Returns the connection, the message
+/// stream, and an Avahi server proxy on the connection.
 async fn connect_and_subscribe(
     interface: &str,
-) -> Result<(Connection, MessageStream), ServiceBrowseError> {
+) -> Result<(Connection, MessageStream, AvahiProxy<'static>), ServiceBrowseError> {
     let conn = Connection::system().await.map_err(|err| {
         ServiceBrowseError::DnsSdUnavailable(format!("failed to connect to system D-Bus: {err}"))
     })?;
@@ -94,27 +94,25 @@ async fn connect_and_subscribe(
         .await
         .map_err(|err| ServiceBrowseError::BrowseFailed(err.to_string()))?;
 
-    Ok((conn, messages))
+    let server = AvahiProxy::new(&conn)
+        .await
+        .map_err(|err| ServiceBrowseError::DnsSdUnavailable(err.to_string()))?;
+
+    Ok((conn, messages, server))
 }
 
 /// Browses the DNS-SD service-type meta-query and starts a per-type instance
 /// browse for each newly discovered type.
 async fn browse_all_types(interface: i32, domain: String, tx: BrowseEventSender) {
-    let (conn, mut messages) = match connect_and_subscribe(SERVICE_TYPE_BROWSER_INTERFACE).await {
-        Ok(parts) => parts,
-        Err(err) => {
-            let _ = tx.send(Err(err));
-            return;
-        }
-    };
-
-    let server = match AvahiProxy::new(&conn).await {
-        Ok(server) => server,
-        Err(err) => {
-            let _ = tx.send(Err(ServiceBrowseError::DnsSdUnavailable(err.to_string())));
-            return;
-        }
-    };
+    // `_conn` is unused directly but kept alive so its message stream stays open.
+    let (_conn, mut messages, server) =
+        match connect_and_subscribe(SERVICE_TYPE_BROWSER_INTERFACE).await {
+            Ok(parts) => parts,
+            Err(err) => {
+                let _ = tx.send(Err(err));
+                return;
+            }
+        };
 
     let type_browser = match server
         .service_type_browser_new(interface, AVAHI_PROTO_UNSPEC, &domain, 0)
@@ -189,21 +187,14 @@ async fn browse_one_type(
     domain: String,
     tx: BrowseEventSender,
 ) {
-    let (conn, mut messages) = match connect_and_subscribe(SERVICE_BROWSER_INTERFACE).await {
-        Ok(parts) => parts,
-        Err(err) => {
-            let _ = tx.send(Err(err));
-            return;
-        }
-    };
-
-    let server = match AvahiProxy::new(&conn).await {
-        Ok(server) => server,
-        Err(err) => {
-            let _ = tx.send(Err(ServiceBrowseError::DnsSdUnavailable(err.to_string())));
-            return;
-        }
-    };
+    let (conn, mut messages, server) =
+        match connect_and_subscribe(SERVICE_BROWSER_INTERFACE).await {
+            Ok(parts) => parts,
+            Err(err) => {
+                let _ = tx.send(Err(err));
+                return;
+            }
+        };
 
     let browser = match server
         .service_browser_new(interface, AVAHI_PROTO_UNSPEC, &service_type, &domain, 0)
