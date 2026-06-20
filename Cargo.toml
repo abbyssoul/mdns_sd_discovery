@@ -1,6 +1,6 @@
 [package]
 name = "mdns-sd-discovery"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 categories = ["network-programming"]
 keywords = ["dns-sd", "mdns", "zeroconf", "bonjour", "avahi"]

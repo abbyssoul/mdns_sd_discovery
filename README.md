@@ -1,9 +1,12 @@
 # `mdns-sd-discovery`
 
-[![GitHub branch check runs](https://img.shields.io/github/actions/workflow/status/abbyssoul/mdns_sd_discovery/ci-test.yml)](https://github.com/abbyssoul/mdns_sd_discovery/actions/workflows/ci-test.yml)
+![GitHub Release](https://img.shields.io/github/v/release/abbyssoul/mdns_sd_discovery)
 [![Crates.io](https://img.shields.io/crates/v/mdns-sd-discovery.svg)](https://crates.io/crates/mdns-sd-discovery)
+[![GitHub branch check runs](https://img.shields.io/github/actions/workflow/status/abbyssoul/mdns_sd_discovery/ci-test.yml)](https://github.com/abbyssoul/mdns_sd_discovery/actions/workflows/ci-test.yml)
 [![Documentation](https://docs.rs/mdns-sd-discovery/badge.svg)](https://docs.rs/mdns-sd-discovery)
 [![License: MIT](https://img.shields.io/crates/l/mdns-sd-discovery.svg)](LICENSE)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=abbyssoul_mdns_sd_discovery&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=abbyssoul_mdns_sd_discovery)
+
 
 Access the operating system's built-in
 [DNS-SD](https://en.wikipedia.org/wiki/Zero-configuration_networking#DNS-based_service_discovery) /
