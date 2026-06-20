@@ -260,3 +260,238 @@ pub(crate) fn parse_txt_buffer(buf: &[u8]) -> Vec<TxtRecord> {
     }
     records
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn sample_service() -> DiscoveredService {
+        DiscoveredService {
+            name: "My Web Server".to_string(),
+            service_type: "_http._tcp".to_string(),
+            domain: "local".to_string(),
+            host_name: "macbook.local".to_string(),
+            port: 8080,
+            addresses: vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
+            txt_records: vec![
+                TxtRecord {
+                    key: "path".to_string(),
+                    value: Some(b"/index.html".to_vec()),
+                },
+                TxtRecord {
+                    key: "empty".to_string(),
+                    value: Some(Vec::new()),
+                },
+                TxtRecord {
+                    key: "flag".to_string(),
+                    value: None,
+                },
+            ],
+            interface_index: NonZeroU32::new(3),
+        }
+    }
+
+    #[test]
+    fn builder_defaults_to_browsing_all_types() {
+        let builder = ServiceBrowserBuilder::new();
+        assert_eq!(builder.service_type, None);
+        assert_eq!(builder.domain, None);
+        assert_eq!(builder.interface_index, None);
+    }
+
+    #[test]
+    fn builder_default_matches_new() {
+        let from_default = ServiceBrowserBuilder::default();
+        let from_new = ServiceBrowserBuilder::new();
+        assert_eq!(from_default.service_type, from_new.service_type);
+        assert_eq!(from_default.domain, from_new.domain);
+        assert_eq!(from_default.interface_index, from_new.interface_index);
+    }
+
+    #[test]
+    fn builder_setters_record_values_and_chain() {
+        let mut builder = ServiceBrowserBuilder::new();
+        builder
+            .service_type("_http._tcp")
+            .domain("local")
+            .interface_index(NonZeroU32::new(7).unwrap());
+
+        assert_eq!(builder.service_type.as_deref(), Some("_http._tcp"));
+        assert_eq!(builder.domain.as_deref(), Some("local"));
+        assert_eq!(builder.interface_index, NonZeroU32::new(7));
+    }
+
+    #[test]
+    fn builder_setters_accept_string_and_overwrite() {
+        let mut builder = ServiceBrowserBuilder::new();
+        builder.service_type(String::from("_ftp._tcp"));
+        builder.service_type("_ipp._tcp");
+        assert_eq!(builder.service_type.as_deref(), Some("_ipp._tcp"));
+    }
+
+    #[test]
+    fn socket_addrs_pairs_each_address_with_port() {
+        let service = sample_service();
+        let addrs: Vec<SocketAddr> = service.socket_addrs().collect();
+        assert_eq!(
+            addrs,
+            vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 8080),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
+            ]
+        );
+    }
+
+    #[test]
+    fn socket_addrs_is_empty_without_addresses() {
+        let mut service = sample_service();
+        service.addresses.clear();
+        assert_eq!(service.socket_addrs().count(), 0);
+    }
+
+    #[test]
+    fn txt_returns_value_for_present_key() {
+        let service = sample_service();
+        assert_eq!(service.txt("path"), Some(&b"/index.html"[..]));
+    }
+
+    #[test]
+    fn txt_returns_empty_slice_for_present_empty_value() {
+        let service = sample_service();
+        assert_eq!(service.txt("empty"), Some(&[][..]));
+    }
+
+    #[test]
+    fn txt_returns_none_for_key_only_entry() {
+        let service = sample_service();
+        assert_eq!(service.txt("flag"), None);
+    }
+
+    #[test]
+    fn txt_returns_none_for_absent_key() {
+        let service = sample_service();
+        assert_eq!(service.txt("missing"), None);
+    }
+
+    #[test]
+    fn txt_returns_first_match_for_duplicate_keys() {
+        let mut service = sample_service();
+        service.txt_records.push(TxtRecord {
+            key: "path".to_string(),
+            value: Some(b"/second".to_vec()),
+        });
+        assert_eq!(service.txt("path"), Some(&b"/index.html"[..]));
+    }
+
+    #[test]
+    fn error_messages_render_expected_text() {
+        assert_eq!(
+            ServiceBrowseError::DnsSdUnavailable("no avahi".into()).to_string(),
+            "DNS-SD not available on system: no avahi"
+        );
+        assert_eq!(
+            ServiceBrowseError::ParameterContainsInteriorNulByte("a\0b".into(), 1).to_string(),
+            "parameter \"a\\0b\" contains interior nul byte at position 1"
+        );
+        assert_eq!(
+            ServiceBrowseError::InvalidInterfaceIndex(42).to_string(),
+            "interface index 42 is invalid"
+        );
+        assert_eq!(
+            ServiceBrowseError::BrowseFailed("boom".into()).to_string(),
+            "browse operation failed: boom"
+        );
+        assert_eq!(
+            ServiceBrowseError::ResolveFailed("svc".into(), "timeout".into()).to_string(),
+            "failed to resolve service \"svc\": timeout"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_txt_entry_splits_key_and_value() {
+        let record = parse_txt_entry(b"path=/index.html");
+        assert_eq!(record.key, "path");
+        assert_eq!(record.value.as_deref(), Some(&b"/index.html"[..]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_txt_entry_empty_value_after_equals() {
+        let record = parse_txt_entry(b"key=");
+        assert_eq!(record.key, "key");
+        assert_eq!(record.value.as_deref(), Some(&[][..]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_txt_entry_key_only_has_no_value() {
+        let record = parse_txt_entry(b"flag");
+        assert_eq!(record.key, "flag");
+        assert_eq!(record.value, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_txt_entry_splits_on_first_equals_only() {
+        let record = parse_txt_entry(b"k=a=b");
+        assert_eq!(record.key, "k");
+        assert_eq!(record.value.as_deref(), Some(&b"a=b"[..]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_txt_entry_preserves_binary_value() {
+        let record = parse_txt_entry(b"bin=\x00\xff\x01");
+        assert_eq!(record.key, "bin");
+        assert_eq!(record.value.as_deref(), Some(&[0x00, 0xff, 0x01][..]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_txt_entry_lossily_decodes_invalid_utf8_key() {
+        let record = parse_txt_entry(b"\xff\xffkey");
+        assert!(record.key.contains('\u{FFFD}'));
+        assert_eq!(record.value, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_txt_buffer_reads_length_prefixed_entries() {
+        // "a=1" (3) , "flag" (4)
+        let buf = [3u8, b'a', b'=', b'1', 4u8, b'f', b'l', b'a', b'g'];
+        let records = parse_txt_buffer(&buf);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].key, "a");
+        assert_eq!(records[0].value.as_deref(), Some(&b"1"[..]));
+        assert_eq!(records[1].key, "flag");
+        assert_eq!(records[1].value, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_txt_buffer_skips_empty_entries() {
+        let buf = [0u8, 3u8, b'a', b'=', b'1'];
+        let records = parse_txt_buffer(&buf);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key, "a");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_txt_buffer_stops_on_truncated_entry() {
+        // claims length 5 but only 2 bytes follow
+        let buf = [5u8, b'a', b'b'];
+        assert!(parse_txt_buffer(&buf).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_txt_buffer_empty_input_yields_no_records() {
+        assert!(parse_txt_buffer(&[]).is_empty());
+    }
+}

@@ -502,3 +502,75 @@ fn first_label(s: &str) -> &str {
 fn trim_dot(s: &str) -> String {
     s.trim_end_matches('.').to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_label_returns_leading_segment() {
+        assert_eq!(first_label("_tcp.local."), "_tcp");
+        assert_eq!(first_label("_udp.example.com"), "_udp");
+    }
+
+    #[test]
+    fn first_label_without_dot_returns_whole_string() {
+        assert_eq!(first_label("_tcp"), "_tcp");
+    }
+
+    #[test]
+    fn first_label_empty_string() {
+        assert_eq!(first_label(""), "");
+    }
+
+    #[test]
+    fn first_label_leading_dot_yields_empty() {
+        assert_eq!(first_label(".local"), "");
+    }
+
+    #[test]
+    fn trim_dot_strips_trailing_dots() {
+        assert_eq!(trim_dot("host.local."), "host.local");
+        assert_eq!(trim_dot("host.local"), "host.local");
+    }
+
+    #[test]
+    fn trim_dot_strips_multiple_trailing_dots() {
+        assert_eq!(trim_dot("host.local.."), "host.local");
+    }
+
+    #[test]
+    fn trim_dot_preserves_interior_dots() {
+        assert_eq!(trim_dot("a.b.c."), "a.b.c");
+    }
+
+    #[test]
+    fn cstring_round_trips_plain_ascii() {
+        let c = cstring("_http._tcp").unwrap();
+        assert_eq!(c.to_bytes(), b"_http._tcp");
+    }
+
+    #[test]
+    fn cstring_rejects_interior_nul() {
+        match cstring("a\0b") {
+            Err(ServiceBrowseError::ParameterContainsInteriorNulByte(s, pos)) => {
+                assert_eq!(s, "a\0b");
+                assert_eq!(pos, 1);
+            }
+            other => panic!("expected interior nul error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cstr_to_string_null_pointer_is_empty() {
+        let s = unsafe { cstr_to_string(std::ptr::null()) };
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn cstr_to_string_reads_c_string() {
+        let c = CString::new("macbook.local").unwrap();
+        let s = unsafe { cstr_to_string(c.as_ptr()) };
+        assert_eq!(s, "macbook.local");
+    }
+}

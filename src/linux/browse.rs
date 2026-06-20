@@ -390,3 +390,55 @@ fn avahi_interface_to_index(interface: i32) -> Option<NonZeroU32> {
         NonZeroU32::new(interface as u32)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_to_avahi_none_is_unspecified() {
+        assert_eq!(interface_to_avahi(None).unwrap(), AVAHI_IF_UNSPEC);
+    }
+
+    #[test]
+    fn interface_to_avahi_passes_valid_index_through() {
+        let idx = NonZeroU32::new(5).unwrap();
+        assert_eq!(interface_to_avahi(Some(idx)).unwrap(), 5);
+    }
+
+    #[test]
+    fn interface_to_avahi_accepts_i32_max() {
+        let idx = NonZeroU32::new(i32::MAX as u32).unwrap();
+        assert_eq!(interface_to_avahi(Some(idx)).unwrap(), i32::MAX);
+    }
+
+    #[test]
+    fn interface_to_avahi_rejects_index_above_i32_max() {
+        let idx = NonZeroU32::new(i32::MAX as u32 + 1).unwrap();
+        match interface_to_avahi(Some(idx)) {
+            Err(ServiceBrowseError::InvalidInterfaceIndex(i)) => {
+                assert_eq!(i, i32::MAX as u32 + 1);
+            }
+            other => panic!("expected InvalidInterfaceIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn avahi_interface_to_index_maps_positive_to_some() {
+        assert_eq!(avahi_interface_to_index(2), NonZeroU32::new(2));
+    }
+
+    #[test]
+    fn avahi_interface_to_index_zero_and_negative_are_none() {
+        assert_eq!(avahi_interface_to_index(0), None);
+        assert_eq!(avahi_interface_to_index(-1), None);
+        assert_eq!(avahi_interface_to_index(AVAHI_IF_UNSPEC), None);
+    }
+
+    #[test]
+    fn interface_round_trips_through_avahi_mapping() {
+        let idx = NonZeroU32::new(9).unwrap();
+        let avahi = interface_to_avahi(Some(idx)).unwrap();
+        assert_eq!(avahi_interface_to_index(avahi), Some(idx));
+    }
+}
