@@ -434,10 +434,11 @@ unsafe extern "C" fn getaddr_callback(
     // SAFETY: `context` is the `AddrResult` owned by the waiting `get_addresses`
     // call, blocked in `DNSServiceProcessResult` while this fires.
     let result = unsafe { &mut *(context as *mut AddrResult) };
-    if error_code == error::NO_ERROR && !address.is_null() {
-        if let Some(ip) = unsafe { sockaddr_to_ip(address) } {
-            result.addrs.push(ip);
-        }
+    if error_code == error::NO_ERROR
+        && !address.is_null()
+        && let Some(ip) = unsafe { sockaddr_to_ip(address) }
+    {
+        result.addrs.push(ip);
     }
     if flags & FLAGS_MORE_COMING == 0 {
         result.done = true;
