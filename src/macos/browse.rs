@@ -15,7 +15,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use super::ffi::*;
 use crate::browse::{
     BrowseEvent, BrowseEventReceiver, BrowseEventSender, DiscoveredService, RemovedService,
-    ServiceBrowseError, TxtRecord, parse_txt_buffer,
+    ServiceBrowseError, TxtRecord, parse_txt_buffer, trim_dot,
 };
 
 /// The DNS-SD meta-query used to enumerate all service types on the network.
@@ -498,11 +498,6 @@ fn first_label(s: &str) -> &str {
     s.split('.').next().unwrap_or(s)
 }
 
-/// Strips a single trailing `.` (DNS-SD names are reported fully qualified).
-fn trim_dot(s: &str) -> String {
-    s.trim_end_matches('.').to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,22 +521,6 @@ mod tests {
     #[test]
     fn first_label_leading_dot_yields_empty() {
         assert_eq!(first_label(".local"), "");
-    }
-
-    #[test]
-    fn trim_dot_strips_trailing_dots() {
-        assert_eq!(trim_dot("host.local."), "host.local");
-        assert_eq!(trim_dot("host.local"), "host.local");
-    }
-
-    #[test]
-    fn trim_dot_strips_multiple_trailing_dots() {
-        assert_eq!(trim_dot("host.local.."), "host.local");
-    }
-
-    #[test]
-    fn trim_dot_preserves_interior_dots() {
-        assert_eq!(trim_dot("a.b.c."), "a.b.c");
     }
 
     #[test]

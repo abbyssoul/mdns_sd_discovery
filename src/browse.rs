@@ -261,6 +261,13 @@ pub(crate) fn parse_txt_buffer(buf: &[u8]) -> Vec<TxtRecord> {
     records
 }
 
+/// Strips trailing `.` characters from a DNS name (DNS-SD names are reported
+/// fully qualified, e.g. `macbook.local.`).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn trim_dot(s: &str) -> String {
+    s.trim_end_matches('.').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +500,24 @@ mod tests {
     #[test]
     fn parse_txt_buffer_empty_input_yields_no_records() {
         assert!(parse_txt_buffer(&[]).is_empty());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn trim_dot_strips_trailing_dots() {
+        assert_eq!(trim_dot("host.local."), "host.local");
+        assert_eq!(trim_dot("host.local"), "host.local");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn trim_dot_strips_multiple_trailing_dots() {
+        assert_eq!(trim_dot("host.local.."), "host.local");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn trim_dot_preserves_interior_dots() {
+        assert_eq!(trim_dot("a.b.c."), "a.b.c");
     }
 }

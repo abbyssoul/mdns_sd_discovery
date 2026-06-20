@@ -13,7 +13,7 @@ use windows::core::{PCWSTR, PWSTR};
 
 use crate::browse::{
     BrowseEvent, BrowseEventReceiver, BrowseEventSender, DiscoveredService, ServiceBrowseError,
-    TxtRecord,
+    TxtRecord, trim_dot,
 };
 
 /// The DNS-SD meta-query used to enumerate all service types on the network.
@@ -407,11 +407,6 @@ fn instance_label(full: &str, service_type: &str, domain: &str) -> String {
     full.strip_suffix(&suffix).unwrap_or(full).to_string()
 }
 
-/// Strips a single trailing `.` (DNS names may be reported fully qualified).
-fn trim_dot(s: &str) -> String {
-    s.trim_end_matches('.').to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,21 +427,5 @@ mod tests {
     fn instance_label_returns_full_when_suffix_absent() {
         let full = "Something._other._tcp.local";
         assert_eq!(instance_label(full, "_http._tcp", "local"), full);
-    }
-
-    #[test]
-    fn trim_dot_strips_trailing_dots() {
-        assert_eq!(trim_dot("host.local."), "host.local");
-        assert_eq!(trim_dot("host.local"), "host.local");
-    }
-
-    #[test]
-    fn trim_dot_strips_multiple_trailing_dots() {
-        assert_eq!(trim_dot("host.local.."), "host.local");
-    }
-
-    #[test]
-    fn trim_dot_preserves_interior_dots() {
-        assert_eq!(trim_dot("a.b.c."), "a.b.c");
     }
 }

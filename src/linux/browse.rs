@@ -187,14 +187,14 @@ async fn browse_one_type(
     domain: String,
     tx: BrowseEventSender,
 ) {
-    let (conn, mut messages, server) =
-        match connect_and_subscribe(SERVICE_BROWSER_INTERFACE).await {
-            Ok(parts) => parts,
-            Err(err) => {
-                let _ = tx.send(Err(err));
-                return;
-            }
-        };
+    let (conn, mut messages, server) = match connect_and_subscribe(SERVICE_BROWSER_INTERFACE).await
+    {
+        Ok(parts) => parts,
+        Err(err) => {
+            let _ = tx.send(Err(err));
+            return;
+        }
+    };
 
     let browser = match server
         .service_browser_new(interface, AVAHI_PROTO_UNSPEC, &service_type, &domain, 0)
