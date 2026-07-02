@@ -1,14 +1,15 @@
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
 #[cfg(all(unix, not(target_os = "macos")))]
-use crate::linux::{BrowseGuard, browse_start};
+use crate::linux::{BrowseGuard, browse_start, resolve_once};
 #[cfg(target_os = "macos")]
-use crate::macos::{BrowseGuard, browse_start};
+use crate::macos::{BrowseGuard, browse_start, resolve_once};
 #[cfg(target_os = "windows")]
-use crate::windows::{BrowseGuard, browse_start};
+use crate::windows::{BrowseGuard, browse_start, resolve_once};
 
 /// Sender used by platform back-ends to publish discovery events.
 pub(crate) type BrowseEventSender = mpsc::UnboundedSender<Result<BrowseEvent, ServiceBrowseError>>;
@@ -116,6 +117,116 @@ impl ServiceBrowser {
     /// is reported as `Some(Err(..))` and does **not** end the stream.
     pub async fn recv(&mut self) -> Option<Result<BrowseEvent, ServiceBrowseError>> {
         self.rx.recv().await
+    }
+}
+
+/// Builder for a one-shot DNS-SD *resolve* of a single, already-known service
+/// instance.
+///
+/// Where [`ServiceBrowserBuilder`] discovers instances over time, this resolves
+/// one named instance *now* — mapping the identity fields from a previous
+/// browse [`BrowseEvent::Found`] (or [`BrowseEvent::Removed`]) event back to a
+/// connectable [`DiscoveredService`]. Its main use is as a liveness probe: a
+/// dead instance fails with [`ServiceBrowseError::ResolveFailed`] rather than
+/// hanging, so consumers can re-confirm services they haven't heard from
+/// recently and drop the ones that repeatedly fail.
+///
+/// This matters for the *no-goodbye* case (a host powered off, crashed, or that
+/// dropped off Wi-Fi without multicasting mDNS goodbye packets): the OS keeps
+/// the browse-driving PTR record until its (long) TTL expires, so no `Removed`
+/// event is delivered for a long time, yet a fresh resolve of the vanished
+/// instance fails promptly.
+///
+/// # Example
+///
+/// ```no_run
+/// use mdns_sd_discovery::{ServiceBrowseError, ServiceResolverBuilder};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// match ServiceResolverBuilder::new("My Web Server", "_http._tcp", "local")
+///     .resolve()
+///     .await
+/// {
+///     Ok(svc) => println!("still alive at {}:{}", svc.host_name, svc.port),
+///     Err(ServiceBrowseError::ResolveFailed(name, _)) => println!("{name} is gone"),
+///     Err(err) => return Err(err.into()),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ServiceResolverBuilder {
+    name: String,
+    service_type: String,
+    domain: String,
+    interface_index: Option<NonZeroU32>,
+    timeout: Option<Duration>,
+}
+
+impl ServiceResolverBuilder {
+    /// Initializes a builder to resolve the instance identified by `name`,
+    /// `service_type` (e.g. `_http._tcp`) and `domain` (e.g. `local`).
+    ///
+    /// These are exactly the [`name`](DiscoveredService::name),
+    /// [`service_type`](DiscoveredService::service_type) and
+    /// [`domain`](DiscoveredService::domain) fields reported by a browse event.
+    pub fn new(
+        name: impl AsRef<str>,
+        service_type: impl AsRef<str>,
+        domain: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            name: name.as_ref().to_string(),
+            service_type: service_type.as_ref().to_string(),
+            domain: domain.as_ref().to_string(),
+            interface_index: None,
+            timeout: None,
+        }
+    }
+
+    /// Restricts the resolve to a single interface (the index reported on the
+    /// originating browse event, via [`DiscoveredService::interface_index`]).
+    ///
+    /// When unset (the default) the instance is resolved on all interfaces.
+    pub fn interface_index(&mut self, index: NonZeroU32) -> &mut Self {
+        self.interface_index = Some(index);
+        self
+    }
+
+    /// Bounds how long [`resolve`](Self::resolve) may take before failing with
+    /// [`ServiceBrowseError::ResolveFailed`].
+    ///
+    /// This is what makes the resolve usable as a liveness probe: without it,
+    /// resolving a vanished instance is only bounded by the platform default
+    /// (on Linux, the D-Bus method timeout of roughly 25 s). Set a shorter
+    /// timeout to fail faster; the platform default still applies as a ceiling.
+    pub fn timeout(&mut self, timeout: Duration) -> &mut Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Resolves the instance, returning a connectable [`DiscoveredService`].
+    ///
+    /// Returns [`ServiceBrowseError::ResolveFailed`] if the instance no longer
+    /// responds (or the configured [`timeout`](Self::timeout) elapses first).
+    pub async fn resolve(&self) -> Result<DiscoveredService, ServiceBrowseError> {
+        let resolve = resolve_once(
+            &self.name,
+            &self.service_type,
+            &self.domain,
+            self.interface_index,
+        );
+        match self.timeout {
+            Some(timeout) => tokio::time::timeout(timeout, resolve)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ServiceBrowseError::ResolveFailed(
+                        self.name.clone(),
+                        format!("timed out after {timeout:?}"),
+                    ))
+                }),
+            None => resolve.await,
+        }
     }
 }
 

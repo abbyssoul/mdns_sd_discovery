@@ -16,6 +16,64 @@ use crate::browse::{
     ServiceBrowseError, parse_txt_entry,
 };
 
+/// Resolves a single service instance to a connectable endpoint using a
+/// dedicated, short-lived D-Bus connection. Returns
+/// [`ServiceBrowseError::ResolveFailed`] if the instance no longer responds,
+/// which callers use as a liveness probe.
+pub(crate) async fn resolve_once(
+    name: &str,
+    service_type: &str,
+    domain: &str,
+    interface_index: Option<NonZeroU32>,
+) -> Result<DiscoveredService, ServiceBrowseError> {
+    let interface = interface_to_avahi(interface_index)?;
+
+    let conn = Connection::system().await.map_err(|err| {
+        ServiceBrowseError::DnsSdUnavailable(format!("failed to connect to system D-Bus: {err}"))
+    })?;
+    let server = AvahiProxy::new(&conn).await.map_err(|err| {
+        ServiceBrowseError::DnsSdUnavailable(format!("failed to connect to Avahi via D-Bus: {err}"))
+    })?;
+
+    match server
+        .resolve_service(
+            interface,
+            AVAHI_PROTO_UNSPEC,
+            name,
+            service_type,
+            domain,
+            AVAHI_PROTO_UNSPEC,
+            0,
+        )
+        .await
+    {
+        Ok(resolved) => Ok(resolved_to_service(resolved)),
+        Err(err) => Err(ServiceBrowseError::ResolveFailed(
+            name.to_string(),
+            err.to_string(),
+        )),
+    }
+}
+
+/// Builds a [`DiscoveredService`] from the tuple returned by
+/// `Server.ResolveService`.
+fn resolved_to_service(resolved: ResolvedService) -> DiscoveredService {
+    let (iface, _proto, name, service_type, domain, host, _aproto, address, port, txt, _flags) =
+        resolved;
+    let addresses: Vec<IpAddr> = IpAddr::from_str(&address).ok().into_iter().collect();
+    let txt_records = txt.iter().map(|entry| parse_txt_entry(entry)).collect();
+    DiscoveredService {
+        name,
+        service_type,
+        domain,
+        host_name: host,
+        port,
+        addresses,
+        txt_records,
+        interface_index: avahi_interface_to_index(iface),
+    }
+}
+
 const SERVICE_BROWSER_INTERFACE: &str = "org.freedesktop.Avahi.ServiceBrowser";
 const SERVICE_TYPE_BROWSER_INTERFACE: &str = "org.freedesktop.Avahi.ServiceTypeBrowser";
 
@@ -323,32 +381,8 @@ async fn resolve_and_emit(
         )
         .await
     {
-        Ok((
-            iface,
-            _proto,
-            name,
-            service_type,
-            domain,
-            host,
-            _aproto,
-            address,
-            port,
-            txt,
-            _flags,
-        )) => {
-            let addresses: Vec<IpAddr> = IpAddr::from_str(&address).ok().into_iter().collect();
-            let txt_records = txt.iter().map(|entry| parse_txt_entry(entry)).collect();
-            let service = DiscoveredService {
-                name,
-                service_type,
-                domain,
-                host_name: host,
-                port,
-                addresses,
-                txt_records,
-                interface_index: avahi_interface_to_index(iface),
-            };
-            let _ = tx.send(Ok(BrowseEvent::Found(service)));
+        Ok(resolved) => {
+            let _ = tx.send(Ok(BrowseEvent::Found(resolved_to_service(resolved))));
         }
         Err(err) => {
             let _ = tx.send(Err(ServiceBrowseError::ResolveFailed(
@@ -431,5 +465,55 @@ mod tests {
         let idx = NonZeroU32::new(9).unwrap();
         let avahi = interface_to_avahi(Some(idx)).unwrap();
         assert_eq!(avahi_interface_to_index(avahi), Some(idx));
+    }
+
+    #[test]
+    fn resolved_to_service_maps_all_fields() {
+        let resolved: ResolvedService = (
+            3,
+            AVAHI_PROTO_UNSPEC,
+            "My Web Server".to_string(),
+            "_http._tcp".to_string(),
+            "local".to_string(),
+            "macbook.local".to_string(),
+            AVAHI_PROTO_UNSPEC,
+            "192.168.1.10".to_string(),
+            8080,
+            vec![b"path=/index.html".to_vec(), b"flag".to_vec()],
+            0,
+        );
+        let service = resolved_to_service(resolved);
+        assert_eq!(service.name, "My Web Server");
+        assert_eq!(service.service_type, "_http._tcp");
+        assert_eq!(service.domain, "local");
+        assert_eq!(service.host_name, "macbook.local");
+        assert_eq!(service.port, 8080);
+        assert_eq!(
+            service.addresses,
+            vec![IpAddr::from_str("192.168.1.10").unwrap()]
+        );
+        assert_eq!(service.txt("path"), Some(&b"/index.html"[..]));
+        assert_eq!(service.txt("flag"), None);
+        assert_eq!(service.interface_index, NonZeroU32::new(3));
+    }
+
+    #[test]
+    fn resolved_to_service_unparsable_address_yields_no_addresses() {
+        let resolved: ResolvedService = (
+            0,
+            AVAHI_PROTO_UNSPEC,
+            "svc".to_string(),
+            "_http._tcp".to_string(),
+            "local".to_string(),
+            "host.local".to_string(),
+            AVAHI_PROTO_UNSPEC,
+            String::new(),
+            80,
+            Vec::new(),
+            0,
+        );
+        let service = resolved_to_service(resolved);
+        assert!(service.addresses.is_empty());
+        assert_eq!(service.interface_index, None);
     }
 }

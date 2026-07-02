@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 use log::trace;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::oneshot;
 use widestring::U16CString;
 use windows::Win32::NetworkManagement::Dns;
 use windows::core::{PCWSTR, PWSTR};
@@ -124,6 +125,115 @@ pub(crate) async fn browse_start(
             _registry: registry,
         },
     ))
+}
+
+/// Success type delivered from the one-shot resolve callback to the awaiting
+/// [`resolve_once`] future.
+type ResolveOnceResult = Result<DiscoveredService, ServiceBrowseError>;
+
+/// Context handed to the one-shot resolve completion callback. Owns the
+/// query-name backing store and the channel back to the awaiting future;
+/// reclaimed (and freed) in the callback.
+struct ResolveOnceContext {
+    tx: oneshot::Sender<ResolveOnceResult>,
+    name: String,
+    service_type: String,
+    domain: String,
+    _query_name: U16CString,
+}
+
+// SAFETY: shared with the OS only via a raw pointer; every field is `Send`.
+unsafe impl Send for ResolveOnceContext {}
+
+/// Resolves a single service instance to a connectable endpoint via
+/// `DnsServiceResolve`. Returns [`ServiceBrowseError::ResolveFailed`] if the
+/// instance no longer responds, which callers use as a liveness probe.
+pub(crate) async fn resolve_once(
+    name: &str,
+    service_type: &str,
+    domain: &str,
+    interface_index: Option<NonZeroU32>,
+) -> Result<DiscoveredService, ServiceBrowseError> {
+    let interface = interface_index.map(|i| i.get()).unwrap_or(0); // 0 = all interfaces
+    let full_name = format!("{name}.{service_type}.{domain}");
+    let query_name_w = U16CString::from_str(&full_name)
+        .map_err(|err| ServiceBrowseError::ResolveFailed(name.to_string(), err.to_string()))?;
+
+    let (tx, rx) = oneshot::channel();
+    let resolve_ctx = Box::new(ResolveOnceContext {
+        tx,
+        name: name.to_string(),
+        service_type: service_type.to_string(),
+        domain: domain.to_string(),
+        _query_name: query_name_w,
+    });
+    let query_ptr = resolve_ctx._query_name.as_ptr();
+    let resolve_ctx_ptr = Box::into_raw(resolve_ctx);
+
+    let request = Dns::DNS_SERVICE_RESOLVE_REQUEST {
+        Version: Dns::DNS_QUERY_REQUEST_VERSION1.0,
+        InterfaceIndex: interface,
+        QueryName: PWSTR(query_ptr as *mut u16),
+        pResolveCompletionCallback: Some(resolve_once_callback),
+        pQueryContext: resolve_ctx_ptr as *mut c_void,
+    };
+
+    let mut cancel = Dns::DNS_SERVICE_CANCEL::default();
+    // SAFETY: `request` references the query name owned by the boxed context,
+    // which stays alive until the completion callback reclaims it.
+    let result = unsafe { Dns::DnsServiceResolve(&request, &mut cancel) };
+    if result != DNS_REQUEST_PENDING {
+        // The callback will not fire; reclaim the context and report the failure.
+        // SAFETY: `resolve_ctx_ptr` came from `Box::into_raw` just above.
+        let resolve_ctx = unsafe { Box::from_raw(resolve_ctx_ptr) };
+        return Err(ServiceBrowseError::ResolveFailed(
+            resolve_ctx.name.clone(),
+            format!("DnsServiceResolve failed with status {result}"),
+        ));
+    }
+
+    // The callback fires (with success or a failure status) on its own thread and
+    // reclaims the boxed context; a dropped receiver simply discards its result.
+    rx.await.unwrap_or_else(|_| {
+        Err(ServiceBrowseError::ResolveFailed(
+            name.to_string(),
+            "resolve completed without a result".to_string(),
+        ))
+    })
+}
+
+unsafe extern "system" fn resolve_once_callback(
+    status: u32,
+    context: *const c_void,
+    instance: *const Dns::DNS_SERVICE_INSTANCE,
+) {
+    // SAFETY: `context` came from `Box::into_raw` in `resolve_once` and is
+    // reclaimed exactly once here.
+    let resolve_ctx = unsafe { Box::from_raw(context as *mut ResolveOnceContext) };
+
+    let result = if status != 0 || instance.is_null() {
+        Err(ServiceBrowseError::ResolveFailed(
+            resolve_ctx.name.clone(),
+            format!("resolve callback status {status}"),
+        ))
+    } else {
+        // SAFETY: a non-null instance is valid and provided by the OS.
+        Ok(unsafe {
+            build_service(
+                &*instance,
+                resolve_ctx.name.clone(),
+                resolve_ctx.service_type.clone(),
+                resolve_ctx.domain.clone(),
+            )
+        })
+    };
+
+    if !instance.is_null() {
+        // SAFETY: a non-null instance is owned by us and freed exactly once.
+        unsafe { Dns::DnsServiceFreeInstance(instance) };
+    }
+
+    let _ = resolve_ctx.tx.send(result);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,8 +438,29 @@ unsafe extern "system" fn resolve_callback(
     }
 
     // SAFETY: `instance` is a valid, non-null instance provided by the OS.
-    let inst = unsafe { &*instance };
+    let service = unsafe {
+        build_service(
+            &*instance,
+            resolve_ctx.name.clone(),
+            resolve_ctx.service_type.clone(),
+            resolve_ctx.domain.clone(),
+        )
+    };
+    let _ = resolve_ctx.tx.send(Ok(BrowseEvent::Found(service)));
 
+    // SAFETY: the instance is owned by us and freed exactly once.
+    unsafe { Dns::DnsServiceFreeInstance(instance) };
+}
+
+/// Builds a [`DiscoveredService`] from a resolved OS service instance, using the
+/// caller-supplied identity fields (`name`/`service_type`/`domain`), which the
+/// instance itself does not carry back in a usable form.
+unsafe fn build_service(
+    inst: &Dns::DNS_SERVICE_INSTANCE,
+    name: String,
+    service_type: String,
+    domain: String,
+) -> DiscoveredService {
     let mut addresses = Vec::new();
     if !inst.ip4Address.is_null() {
         // SAFETY: non-null per the check above; value is a network-order IPv4.
@@ -344,20 +475,16 @@ unsafe extern "system" fn resolve_callback(
 
     let txt_records = unsafe { read_txt(inst) };
 
-    let service = DiscoveredService {
-        name: resolve_ctx.name.clone(),
-        service_type: resolve_ctx.service_type.clone(),
-        domain: resolve_ctx.domain.clone(),
+    DiscoveredService {
+        name,
+        service_type,
+        domain,
         host_name: trim_dot(&unsafe { pwstr_to_string(inst.pszHostName) }),
         port: inst.wPort,
         addresses,
         txt_records,
         interface_index: NonZeroU32::new(inst.dwInterfaceIndex),
-    };
-    let _ = resolve_ctx.tx.send(Ok(BrowseEvent::Found(service)));
-
-    // SAFETY: the instance is owned by us and freed exactly once.
-    unsafe { Dns::DnsServiceFreeInstance(instance) };
+    }
 }
 
 /// Reads the TXT key/value pairs out of a resolved service instance.

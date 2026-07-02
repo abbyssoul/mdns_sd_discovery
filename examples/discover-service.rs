@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use clap::Parser;
 use log::{error, info};
 
-use mdns_sd_discovery::{BrowseEvent, ServiceBrowserBuilder};
+use mdns_sd_discovery::{BrowseEvent, ServiceBrowserBuilder, ServiceResolverBuilder};
 
 /// Browse for DNS-SD services and print them as they come and go.
 ///
@@ -26,6 +26,16 @@ struct Args {
     #[arg(short, long, value_name = "INDEX")]
     interface: Option<NonZeroU32>,
 
+    /// Instead of browsing, resolve a single instance by name once and exit.
+    /// Requires `--type`; useful as a liveness probe. Reports success or
+    /// `ResolveFailed` (within `--timeout`) if the instance no longer responds.
+    #[arg(short = 'r', long = "resolve", value_name = "NAME")]
+    resolve: Option<String>,
+
+    /// Timeout in seconds for `--resolve` (defaults to the platform default).
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
+
     /// Enable trace-level logging (default is debug).
     #[arg(short, long)]
     verbose: bool,
@@ -43,6 +53,11 @@ async fn main() {
         })
         .parse_default_env()
         .init();
+
+    if let Some(name) = &args.resolve {
+        resolve_once(&args, name).await;
+        return;
+    }
 
     let mut builder = ServiceBrowserBuilder::new();
     if let Some(service_type) = &args.service_type {
@@ -96,4 +111,38 @@ async fn main() {
     }
 
     // Dropping `browser` here stops the underlying native browse operation.
+}
+
+/// Resolves a single instance once and prints the outcome (a liveness probe).
+async fn resolve_once(args: &Args, name: &str) {
+    let Some(service_type) = &args.service_type else {
+        error!("--resolve requires --type SERVICE_TYPE");
+        return;
+    };
+    let domain = args.domain.as_deref().unwrap_or("local");
+
+    let mut builder = ServiceResolverBuilder::new(name, service_type, domain);
+    if let Some(index) = args.interface {
+        builder.interface_index(index);
+    }
+    if let Some(secs) = args.timeout {
+        builder.timeout(std::time::Duration::from_secs(secs));
+    }
+
+    info!("resolving {name:?} ({service_type} in {domain})...");
+    match builder.resolve().await {
+        Ok(svc) => {
+            println!(
+                "+ [{}] {:?}  {}:{}  {:?}",
+                svc.service_type, svc.name, svc.host_name, svc.port, svc.addresses
+            );
+            for txt in &svc.txt_records {
+                match &txt.value {
+                    Some(v) => println!("    {} = {}", txt.key, String::from_utf8_lossy(v)),
+                    None => println!("    {}", txt.key),
+                }
+            }
+        }
+        Err(err) => error!("resolve failed: {err}"),
+    }
 }

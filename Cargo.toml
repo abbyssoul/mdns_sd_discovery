@@ -1,6 +1,6 @@
 [package]
 name = "mdns-sd-discovery"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 categories = ["network-programming"]
 keywords = ["dns-sd", "mdns", "zeroconf", "bonjour", "avahi"]
@@ -14,7 +14,7 @@ description = "Async wrapper for native DNS-SD/mDNS service discovery"
 [dependencies]
 log = "0.4.29"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync"] }
+tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync", "time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

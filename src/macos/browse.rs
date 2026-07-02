@@ -69,6 +69,45 @@ pub(crate) async fn browse_start(
     Ok((rx, BrowseGuard { stop }))
 }
 
+/// Resolves a single service instance to a connectable endpoint via
+/// `DNSServiceResolve` (+ `DNSServiceGetAddrInfo`). Returns
+/// [`ServiceBrowseError::ResolveFailed`] if the instance no longer responds,
+/// which callers use as a liveness probe.
+///
+/// The blocking DNS-SD calls run on a blocking thread so the async caller is
+/// not stalled.
+pub(crate) async fn resolve_once(
+    name: &str,
+    service_type: &str,
+    domain: &str,
+    interface_index: Option<NonZeroU32>,
+) -> Result<DiscoveredService, ServiceBrowseError> {
+    let interface = interface_index.map(|i| i.get()).unwrap_or(0); // 0 = all interfaces
+    let name = name.to_string();
+    let service_type = service_type.to_string();
+    let domain = domain.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        let (host, port, txt_records) = do_resolve(&name, &service_type, &domain, interface)
+            .map_err(|err| ServiceBrowseError::ResolveFailed(name.clone(), err))?;
+        let addresses = get_addresses(&host, interface).unwrap_or_default();
+        Ok(DiscoveredService {
+            name,
+            service_type: trim_dot(&service_type),
+            domain: trim_dot(&domain),
+            host_name: trim_dot(&host),
+            port,
+            addresses,
+            txt_records,
+            interface_index: NonZeroU32::new(interface),
+        })
+    })
+    .await
+    .map_err(|err| {
+        ServiceBrowseError::ResolveFailed(String::new(), format!("resolve task failed: {err}"))
+    })?
+}
+
 /// Context handed to the browse callback for the lifetime of one browse thread.
 /// Only ever accessed on that thread (the callback runs synchronously inside
 /// `DNSServiceProcessResult`), so interior mutability needs no locking.

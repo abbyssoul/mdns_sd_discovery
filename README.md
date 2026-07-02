@@ -66,8 +66,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Re-confirm a service is still alive
+
+`ServiceResolverBuilder` resolves a single, already-known instance *now*, mapping
+the identity fields from a previous browse event back to a connectable
+`DiscoveredService`. A vanished instance fails with
+`ServiceBrowseError::ResolveFailed` (rather than hanging), making it a useful
+liveness probe — handy for the *no-goodbye* case where a host powered off or
+dropped off the network without multicasting mDNS goodbye packets, so no
+`Removed` event is delivered until the browse PTR record's (long) TTL expires.
+
+```rust
+use mdns_sd_discovery::{ServiceBrowseError, ServiceResolverBuilder};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let result = ServiceResolverBuilder::new("My Web Server", "_http._tcp", "local")
+        .timeout(Duration::from_secs(5))
+        .resolve()
+        .await;
+
+    match result {
+        Ok(svc) => println!("still alive at {}:{}", svc.host_name, svc.port),
+        Err(ServiceBrowseError::ResolveFailed(name, _)) => println!("{name} is gone"),
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+```
+
 See the [`examples/`](examples/) directory for a full CLI tool that browses
-(`discover-service`) services.
+(`discover-service`) services; pass `--resolve NAME --type _http._tcp` to probe a
+single instance instead.
 
 > **Platform note:** on Windows, service _removal_ (`BrowseEvent::Removed`) is not currently
 > reported; appearances and resolution are. Removal events are delivered on macOS and Linux.
