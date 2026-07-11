@@ -3,7 +3,9 @@ name: Publish Crate package
 on:
   release:
     types: [created]
-  # Fallback for re-running a failed publish; dispatch from the release tag.
+  # Primary trigger: prepare-release.yml dispatches this at the release tag
+  # (its GITHUB_TOKEN-created release cannot fire the `release` event above).
+  # Also usable manually to re-run a failed publish; dispatch from the tag.
   workflow_dispatch:
 
 permissions:

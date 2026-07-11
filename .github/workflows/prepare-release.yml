@@ -1,0 +1,143 @@
+name: Prepare Release
+
+# Triggered by pushing a tag like `v0.1.2` (`git tag v0.1.2 && git push origin
+# v0.1.2`, or via the GitHub UI). The tag itself is only a request: it is
+# reclaimed (deleted) below and re-created once `main` actually contains that
+# version, so the published crate always matches the commit its tag points
+# to. If this workflow fails partway, just push the same tag again to retry.
+
+on:
+  push:
+    # Only semver-shaped tags: the first step deletes the pushed tag, so a
+    # loose `v*` glob would eat any tag that merely starts with a `v`.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # required for `gh workflow run` below
+
+# Serialize releases; never cancel one that is underway.
+concurrency:
+  group: prepare-release
+
+env:
+  CARGO_TERM_COLOR: always
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Parse the requested version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # This must run BEFORE the tag is touched: a duplicate push of the same
+      # tag lands here after the first run has already published the release,
+      # and deleting the tag at that point would strip it off the release and
+      # turn the release back into a draft (breaking the publish jobs the
+      # first run dispatched at that tag).
+      - name: Skip if this release already exists
+        id: check
+        run: |
+          state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null || echo absent)"
+          # A draft with this name is debris from a failed or clobbered
+          # earlier attempt (its tag is gone, so it will never publish):
+          # remove it and run the release from scratch.
+          if [ "$state" = "true" ]; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+            state=absent
+          fi
+          if [ "$state" = "false" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reclaim the tag as a release request
+        if: steps.check.outputs.exists == 'false'
+        # `|| true`: when a failed run is retried by pushing the tag again,
+        # the failed run may have already deleted it.
+        run: git push origin --delete "$GITHUB_REF_NAME" || true
+
+      - name: Set up build environment
+        if: steps.check.outputs.exists == 'false'
+        uses: ./.github/actions/setup
+
+      - name: Install cargo-edit
+        if: steps.check.outputs.exists == 'false'
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: cargo-edit
+
+      - name: Bump Cargo.toml to the requested version
+        if: steps.check.outputs.exists == 'false'
+        id: bump
+        run: |
+          branch="release/v${{ steps.ver.outputs.version }}"
+          git checkout -B "$branch" "origin/main"
+
+          current="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$current" = "${{ steps.ver.outputs.version }}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cargo set-version "${{ steps.ver.outputs.version }}"
+
+          # Pushes and PRs made with GITHUB_TOKEN trigger no other workflows,
+          # so regular CI never sees this commit: run the tests here before
+          # the PR is merged below.
+          cargo test --locked
+
+          git config user.name "github-actions-release[bot]"
+          git config user.email "github-actions-release[bot]@users.noreply.github.com"
+          git commit -am "Bump version to ${{ steps.ver.outputs.version }}"
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch:refs/remotes/origin/$branch"
+            git rebase "origin/$branch"
+          fi
+
+          git push origin "HEAD:$branch"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open and merge the version-bump PR
+        if: steps.check.outputs.exists == 'false' && steps.bump.outputs.changed == 'true'
+        id: merge
+        run: |
+          gh pr create \
+            --base main \
+            --head "release/v${{ steps.ver.outputs.version }}" \
+            --title "Release v${{ steps.ver.outputs.version }}" \
+            --body "Automated version bump for v${{ steps.ver.outputs.version }}."
+          # `--admin` because a GITHUB_TOKEN-created PR gets no CI checks to
+          # wait for (see above); the tests already ran in the bump step.
+          gh pr merge "release/v${{ steps.ver.outputs.version }}" \
+            --squash --delete-branch --admin
+          git fetch origin main
+          echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release commit when no bump was needed
+        if: steps.check.outputs.exists == 'false' && steps.bump.outputs.changed == 'false'
+        id: nobump
+        run: echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Create the release and dispatch publish jobs
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          sha="${{ steps.merge.outputs.sha || steps.nobump.outputs.sha }}"
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            --target "$sha" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --generate-notes
+
+          # A release created via GITHUB_TOKEN does not auto-trigger other
+          # workflows' `release: created` listeners, so dispatch it directly.
+          gh workflow run publish-crate.yml --ref "v${{ steps.ver.outputs.version }}"
