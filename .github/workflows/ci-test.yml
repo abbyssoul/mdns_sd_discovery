@@ -6,36 +6,46 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+# Cancel superseded runs when a branch is pushed again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   format:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - name: Check formatting
       run: cargo fmt -- --check
 
   build:
+    name: Check and test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, windows-latest, macos-latest ]
 
-    runs-on: ${{ matrix.os }}
-
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
+    - name: Set up build environment
+      uses: ./.github/actions/setup
+
+    # Each platform's backend is cfg-gated, so clippy must run per-OS to lint
+    # the linux/macos/windows modules at all.
     - name: Run clippy
       run: cargo clippy --locked --all-targets -- -D warnings
 
-    - name: Build
-      run: cargo build --locked --verbose
-
+    # `cargo test` builds every target it needs, so a separate build step
+    # would only duplicate work.
     - name: Run tests
-      run: cargo test --locked --verbose
+      run: cargo test --locked

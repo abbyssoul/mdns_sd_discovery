@@ -3,9 +3,11 @@ name: Publish Crate package
 on:
   release:
     types: [created]
+  # Fallback for re-running a failed publish; dispatch from the release tag.
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,14 +17,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
 
-      - name: Install toml-cli
-        run: cargo install toml-cli
-      
       - name: Check Cargo.toml version matches release tag
-        run: test "v$(toml get -r Cargo.toml package.version)" = "${{ github.ref_name }}"
+        run: test "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" = "${{ github.ref_name }}"
 
       - name: Publish Crate
         run: cargo publish --locked --verbose

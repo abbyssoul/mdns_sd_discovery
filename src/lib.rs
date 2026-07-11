@@ -44,6 +44,32 @@ pub use self::browse::*;
 
 mod browse;
 
+/// Wire-format parsing internals re-exported for the fuzz targets in `fuzz/`.
+///
+/// `cargo fuzz` builds the whole graph with `--cfg fuzzing`; on regular builds
+/// this module does not exist. It is **not** part of the public API.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    use crate::TxtRecord;
+
+    /// Parses a single `key[=value]` TXT entry. See `browse::parse_txt_entry`.
+    pub fn parse_txt_entry(entry: &[u8]) -> TxtRecord {
+        crate::browse::parse_txt_entry(entry)
+    }
+
+    /// Parses a packed, length-prefixed DNS-SD TXT record buffer.
+    /// See `browse::parse_txt_buffer`.
+    pub fn parse_txt_buffer(buf: &[u8]) -> Vec<TxtRecord> {
+        crate::browse::parse_txt_buffer(buf)
+    }
+
+    /// Strips trailing `.` characters from a DNS name. See `browse::trim_dot`.
+    pub fn trim_dot(s: &str) -> String {
+        crate::browse::trim_dot(s)
+    }
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(target_os = "macos")]

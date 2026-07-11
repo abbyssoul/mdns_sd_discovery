@@ -1,0 +1,74 @@
+name: Fuzz
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    # Monday 03:00 UTC — longer soak run.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to run each fuzz target"
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup
+        with:
+          cache-workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: cargo-fuzz
+
+      # Restore the newest corpus from earlier runs and save this run's
+      # additions under a fresh key, so coverage accumulates across runs
+      # instead of restarting from the seed inputs every time.
+      - name: Restore accumulated corpus
+        uses: actions/cache@v6
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Pick duration
+        id: dur
+        run: |
+          case "${{ github.event_name }}" in
+            schedule)         echo "seconds=600" >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch) echo "seconds=${{ github.event.inputs.seconds }}" >> "$GITHUB_OUTPUT" ;;
+            *)                echo "seconds=60"  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Run fuzz targets
+        run: scripts/fuzz.sh "${{ steps.dur.outputs.seconds }}"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

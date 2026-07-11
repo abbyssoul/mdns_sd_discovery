@@ -1,0 +1,48 @@
+[package]
+name = "mdns-sd-discovery-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mdns-sd-discovery]
+path = ".."
+
+# Keep this crate out of the parent package's build graph.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse_txt_entry"
+path = "fuzz_targets/parse_txt_entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_txt_buffer"
+path = "fuzz_targets/parse_txt_buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "txt_roundtrip"
+path = "fuzz_targets/txt_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trim_dot"
+path = "fuzz_targets/trim_dot.rs"
+test = false
+doc = false
+bench = false

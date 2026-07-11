@@ -1,0 +1,53 @@
+name: SonarCloud analysis
+
+# Project key/organization and the coverage report path live in
+# sonar-project.properties; SONAR_TOKEN comes from the repo secrets.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read # allows SonarCloud to decorate PRs with analysis results
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  analysis:
+    # Dependabot PRs run without access to repo secrets, so the scanner would
+    # fail with an empty SONAR_TOKEN; main-branch analysis after merge still
+    # covers those changes.
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # full history improves blame and new-code detection
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate test coverage
+        run: |
+          rustup component add llvm-tools
+          cargo llvm-cov --locked --lcov --output-path lcov.info
+
+      - name: Analyze with SonarCloud
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e #v8.2.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

@@ -302,7 +302,7 @@ pub struct RemovedService {
 ///
 /// `value` is binary-safe and is `None` for a key-only entry (a key advertised
 /// without an `=`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxtRecord {
     /// The TXT record key.
     pub key: String,
@@ -338,7 +338,7 @@ pub enum ServiceBrowseError {
 ///
 /// Everything before the first `=` is the key; everything after is the
 /// (binary-safe) value. An entry with no `=` is key-only.
-#[cfg(unix)]
+#[cfg(any(unix, fuzzing))]
 pub(crate) fn parse_txt_entry(entry: &[u8]) -> TxtRecord {
     match entry.iter().position(|&b| b == b'=') {
         Some(pos) => TxtRecord {
@@ -354,7 +354,7 @@ pub(crate) fn parse_txt_entry(entry: &[u8]) -> TxtRecord {
 
 /// Parses a packed DNS-SD TXT record buffer (a sequence of length-prefixed
 /// `key[=value]` entries) into [`TxtRecord`]s. Empty entries are skipped.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", fuzzing))]
 pub(crate) fn parse_txt_buffer(buf: &[u8]) -> Vec<TxtRecord> {
     let mut records = Vec::new();
     let mut i = 0;
@@ -374,7 +374,7 @@ pub(crate) fn parse_txt_buffer(buf: &[u8]) -> Vec<TxtRecord> {
 
 /// Strips trailing `.` characters from a DNS name (DNS-SD names are reported
 /// fully qualified, e.g. `macbook.local.`).
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", fuzzing))]
 pub(crate) fn trim_dot(s: &str) -> String {
     s.trim_end_matches('.').to_string()
 }

@@ -2,11 +2,16 @@ name: "CodeQL Analysis"
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "develop" ]
+    branches: [ "main" ]
+  workflow_dispatch:
   schedule:
     - cron: '30 18 * * 1' # Runs every Monday at 18:30 UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
@@ -19,14 +24,14 @@ jobs:
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
       with:
         languages: rust
         # Options: 'none' (interpreted, or some compiled), 'autobuild', 'manual'
-        build-mode: 'none' 
+        build-mode: 'none'
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4

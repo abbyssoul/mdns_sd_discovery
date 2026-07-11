@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a new capability or improvement.
+title: "Feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or impossible with the crate today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like `mdns-sd-discovery` to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workaround or other design you considered?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Browsing / discovery
+        - Resolving
+        - Linux backend (Avahi)
+        - macOS backend (DNS-SD framework)
+        - Windows backend (Win32 API)
+        - Documentation
+        - Other
+    validations:
+      required: true

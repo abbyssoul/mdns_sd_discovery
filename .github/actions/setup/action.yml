@@ -1,0 +1,19 @@
+name: Set up build environment
+description: >
+  The Rust build cache, shared by every workflow that compiles the crate. The
+  crate has no native system dependencies on any platform (Linux talks to
+  Avahi over D-Bus via zbus), so this is cache-only; if that ever changes,
+  the dependency install belongs here.
+
+inputs:
+  cache-workspaces:
+    description: Workspaces passed through to rust-cache (one `path -> target` per line).
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ${{ inputs.cache-workspaces }}

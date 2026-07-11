@@ -1,0 +1,49 @@
+name: Bug report
+description: Report something that is broken or behaving unexpectedly.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal code snippet using the crate.
+      placeholder: |
+        1. Build a browser with `ServiceBrowserBuilder::new()...`
+        2. Await events ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        Include OS and version, crate version, and (on Linux) whether the
+        Avahi daemon is running.
+      placeholder: |
+        OS:
+        mdns-sd-discovery version:
+        Rust toolchain:
+        Avahi daemon status (Linux):
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      render: text
