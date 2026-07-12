@@ -32,7 +32,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        # macos-latest is already aarch64 (Apple Silicon); ubuntu-24.04-arm
+        # adds Linux ARM coverage, leaving only Windows as x86_64-only.
+        os: [ ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest ]
 
     steps:
     - uses: actions/checkout@v7
