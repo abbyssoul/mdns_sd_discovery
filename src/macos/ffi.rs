@@ -9,7 +9,14 @@ pub type DNSServiceProtocol = u32;
 /// Set in browse/resolve reply flags when the result is an addition (vs removal).
 pub const FLAGS_ADD: DNSServiceFlags = 0x2;
 /// Set in reply flags when more results are imminent (callback will fire again soon).
+///
+/// On a shared connection this flag is *collective*: it means more results are
+/// queued on the parent reference, not necessarily for the callback that saw it.
 pub const FLAGS_MORE_COMING: DNSServiceFlags = 0x1;
+/// Passed when starting an operation on a reference copied from one created by
+/// [`DNSServiceCreateConnection`], so the library reuses that connection instead
+/// of opening a new socket to the daemon.
+pub const FLAGS_SHARE_CONNECTION: DNSServiceFlags = 0x4000;
 
 pub mod error {
     pub type ServiceError = i32;
@@ -71,6 +78,10 @@ pub type DNSServiceGetAddrInfoReply = Option<
 >;
 
 unsafe extern "C" {
+    /// Creates a shareable reference: operations started on copies of it (with
+    /// [`FLAGS_SHARE_CONNECTION`]) reuse its single socket to the daemon.
+    pub unsafe fn DNSServiceCreateConnection(sdRef: *mut DNSServiceRef) -> error::ServiceError;
+
     pub unsafe fn DNSServiceBrowse(
         sdRef: *mut DNSServiceRef,
         flags: DNSServiceFlags,
