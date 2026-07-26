@@ -103,6 +103,94 @@ single instance instead.
 > **Platform note:** on Windows, service _removal_ (`BrowseEvent::Removed`) is not currently
 > reported; appearances and resolution are. Removal events are delivered on macOS and Linux.
 
+## Troubleshooting
+
+This crate is a thin wrapper: it asks the OS stack what it can see. When a browse
+returns nothing, the first thing to establish is whether the *OS* can see
+anything, using the tool that ships with the platform. If the platform tool finds
+nothing either, the problem is below this crate — permissions, the daemon, or the
+network.
+
+```console
+$ cargo run --example discover-service              # all service types
+$ cargo run --example discover-service -- -t _ssh._tcp   # one type
+```
+
+Run with `RUST_LOG=trace` (the example initialises `env_logger`) to see each
+discovered service type as the meta-query reports it.
+
+### macOS
+
+Ground truth is Apple's own client, which talks to the same daemon
+(`mDNSResponder`) through the same API:
+
+```console
+$ dns-sd -B _services._dns-sd._udp     # every service type on the network
+$ dns-sd -B _companion-link._tcp       # a type every Mac advertises
+```
+
+If `dns-sd` prints nothing either, discovery is being blocked outside this crate.
+The usual causes, in the order worth checking:
+
+**Local Network permission (macOS 15 Sequoia and later).** macOS now gates
+sending mDNS queries behind a per-app *Local Network* privilege. A command-line
+tool has no identity of its own, so the grant belongs to the **responsible parent
+process** — the terminal emulator, IDE, or launch agent that started it. Check
+_System Settings → Privacy & Security → Local Network_ and confirm your terminal
+app is enabled. Two things make this easy to miss:
+
+- The tool itself will usually not be listed at all; only the parent app is.
+- Something that works when launched from a terminal can silently find nothing
+  when launched from a launch agent or cron, which has no grant.
+
+When the daemon denies a browse for this reason, the denial is surfaced through
+the event stream rather than swallowed:
+
+```text
+browse operation failed: browse callback error: -65570
+```
+
+`-65570` is `kDNSServiceErr_PolicyDenied` — the browse never went out on the
+wire. Other codes worth recognising: `-65563`
+(`kDNSServiceErr_ServiceNotRunning`, the daemon is not running) and `-65553`
+(`kDNSServiceErr_Refused`). To watch the daemon's own view while reproducing:
+
+```console
+$ log stream --predicate 'process == "mDNSResponder"'
+```
+
+**Network conditions.** A full-tunnel VPN can route link-local multicast away
+from the LAN, and clients on different subnets or VLANs will not see each other
+without an mDNS reflector on the router. Both look identical to a permission
+problem from the application's side. If a device is reachable by IP but never
+appears in a browse, discovery is the part that is broken, not connectivity.
+
+**Sanity-check the split.** If an explicit type finds services but browsing all
+types does not, that points at the service-type meta-query rather than the OS:
+
+```console
+$ dns-sd -B _companion-link._tcp       # works?
+$ dns-sd -B _services._dns-sd._udp     # but this finds nothing?
+```
+
+Please report that combination — with the `dns-sd` output for both — as a bug
+against this crate.
+
+### Linux / BSD
+
+Discovery needs the Avahi daemon running and reachable on the system D-Bus;
+without it, `browse()` fails with `ServiceBrowseError::DnsSdUnavailable` rather
+than returning an empty result. Ground truth:
+
+```console
+$ systemctl status avahi-daemon
+$ avahi-browse -a                      # every service type
+$ avahi-browse _ssh._tcp -r            # one type, resolved
+```
+
+Note that Avahi's default configuration disables wide-area (unicast) DNS-SD and
+may restrict which interfaces it publishes on; see `/etc/avahi/avahi-daemon.conf`.
+
 ## License
 
 [MIT](LICENSE)
