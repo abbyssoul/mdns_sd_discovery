@@ -24,11 +24,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Pinned rather than floating `nightly`: rustc 1.99.0-nightly (008fa22ce
-  # 2026-07-25) ICEs compiling tokio under `-Zsanitizer=address`
-  # ("not immediate: OperandRef(Uninit ...)", rustc_codegen_ssa
-  # mir/operand.rs:291), which fails every target at build time before any
-  # fuzzing runs. 2026-07-20 is verified to build the fuzz graph with the flags
-  # cargo-fuzz passes. Revisit and drop the pin once a newer nightly works.
+  # 2026-07-25) ICEs compiling tokio ("not immediate: OperandRef(Uninit ...)",
+  # rustc_codegen_ssa mir/operand.rs:291), which fails every target at build
+  # time before any fuzzing runs. Upstream rust-lang/rust#159815, fixed by
+  # rust-lang/rust#159825 (merged 2026-07-26 06:29 UTC, i.e. after the nightly
+  # above was cut) — so the first nightly with the fix is 2026-07-27.
+  #
+  # TO UNPIN: check that the current nightly builds the fuzz targets
+  # (`FUZZ_TOOLCHAIN=nightly scripts/fuzz.sh 5`) and drop this variable and the
+  # `toolchain:` input below. Verify rather than assume: rust-lang/rust#159867 is
+  # a still-open ICE in the same `OperandValue::Uninit` family.
+  #
+  # 2026-07-20 is verified to build the fuzz graph and run the targets.
   # `scripts/fuzz.sh` reads this to pick the toolchain it drives cargo-fuzz with.
   FUZZ_TOOLCHAIN: nightly-2026-07-20
 
