@@ -39,9 +39,19 @@ fi
 
 status=0
 for target in "${targets[@]}"; do
+    # Build as its own step so a compile failure is not reported as a crash the
+    # fuzzer found: those mean completely different things, and only the second
+    # produces an artifact to reproduce from.
+    echo "==> building '${target}'"
+    if ! cargo "+${NIGHTLY}" fuzz build "${target}"; then
+        echo "!!! target '${target}' failed to BUILD (toolchain or dependency problem, not a fuzz finding)" >&2
+        status=1
+        continue
+    fi
+
     echo "==> fuzzing '${target}' for ${DURATION}s"
     if ! cargo "+${NIGHTLY}" fuzz run "${target}" -- -max_total_time="${DURATION}"; then
-        echo "!!! target '${target}' found a failure" >&2
+        echo "!!! target '${target}' found a failure; see fuzz/artifacts/${target}/" >&2
         status=1
     fi
 done
