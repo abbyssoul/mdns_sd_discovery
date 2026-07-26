@@ -20,16 +20,16 @@ use crate::browse::{
 
 /// The DNS-SD meta-query used to enumerate all service types on the network.
 const META_QUERY_TYPE: &str = "_services._dns-sd._udp";
-/// How often the browse poll loop wakes to check the stop flag (milliseconds).
+/// How often the browse pump wakes to check the stop flag (milliseconds).
 const POLL_INTERVAL_MS: i32 = 200;
 /// Per-instance resolve timeout (milliseconds).
 const RESOLVE_TIMEOUT_MS: i32 = 5000;
 /// Per-instance address-lookup budget (milliseconds).
 const GETADDR_TIMEOUT_MS: u64 = 2000;
 
-/// Guard returned alongside the event receiver. Dropping it signals every browse
-/// thread (root and per-type children) to stop; each tears down its native
-/// browse operation and exits within one poll interval.
+/// Guard returned alongside the event receiver. Dropping it signals the browse
+/// pump to stop; within one poll interval it tears down every native browse
+/// operation, closes the shared connection to the daemon, and exits.
 pub(crate) struct BrowseGuard {
     stop: Arc<AtomicBool>,
 }
@@ -56,15 +56,14 @@ pub(crate) async fn browse_start(
         None => (META_QUERY_TYPE.to_string(), true),
     };
 
-    spawn_browse_thread(
-        regtype,
-        domain,
-        interface,
-        is_meta,
-        tx,
-        handle,
-        stop.clone(),
-    );
+    let pump_stop = stop.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = run_pump(
+            &regtype, &domain, interface, is_meta, &tx, &handle, &pump_stop,
+        ) {
+            let _ = tx.send(Err(err));
+        }
+    });
 
     Ok((rx, BrowseGuard { stop }))
 }
@@ -108,39 +107,152 @@ pub(crate) async fn resolve_once(
     })?
 }
 
-/// Context handed to the browse callback for the lifetime of one browse thread.
-/// Only ever accessed on that thread (the callback runs synchronously inside
-/// `DNSServiceProcessResult`), so interior mutability needs no locking.
-struct BrowseThreadContext {
+/// State shared by every browse operation the pump drives.
+///
+/// Only ever touched on the pump thread — the callbacks run synchronously inside
+/// `DNSServiceProcessResult` — so interior mutability needs no locking.
+struct PumpState {
     tx: BrowseEventSender,
     handle: Handle,
-    stop: Arc<AtomicBool>,
-    is_meta: bool,
     /// Interface scope requested by the caller (0 = all). Used for child browses.
     interface: u32,
-    /// For meta browses: `(service_type, domain)` pairs already seen, to avoid
-    /// duplicate child browses. The domain is part of the key because the same
-    /// type may be advertised in more than one domain.
+    /// `(service_type, domain)` pairs the meta browse has already reported, to
+    /// avoid duplicate child browses. The domain is part of the key because the
+    /// same type may be advertised in more than one domain.
     seen: RefCell<HashSet<(String, String)>>,
+    /// Types the meta browse discovered, waiting for the pump to start a browse
+    /// for each. The callback cannot start them itself: it runs inside
+    /// `DNSServiceProcessResult`, and starting an operation there would re-enter
+    /// the very connection being dispatched on.
+    pending: RefCell<Vec<(String, String)>>,
 }
 
-fn spawn_browse_thread(
-    regtype: String,
-    domain: String,
-    interface: u32,
+/// Callback context for one browse operation: the shared state, plus how to
+/// interpret this operation's replies.
+///
+/// Exactly two of these exist per pump — one for the meta-query and one shared
+/// by every per-type instance browse, which needs no per-operation state because
+/// each reply carries its own service type and domain.
+struct OpContext<'a> {
+    state: &'a PumpState,
     is_meta: bool,
-    tx: BrowseEventSender,
-    handle: Handle,
-    stop: Arc<AtomicBool>,
-) {
-    std::thread::spawn(move || {
-        if let Err(err) = run_browse(&regtype, &domain, interface, is_meta, &tx, &handle, &stop) {
-            let _ = tx.send(Err(err));
-        }
-    });
 }
 
-fn run_browse(
+/// A single connection to the daemon, plus every browse operation started on it.
+///
+/// `dns_sd.h` documents the ordering this type exists to enforce: deallocating
+/// the parent reference implicitly terminates the operations sharing it, and
+/// touching them afterwards is a use-after-free. So `Drop` releases the
+/// operations first and the connection last.
+///
+/// Not `Send`: `dns_sd.h` does no internal locking, and deallocating a reference
+/// while another thread is inside `DNSServiceProcessResult` on it is the classic
+/// crash. Everything here happens on the pump thread.
+struct SharedConnection {
+    shared: DNSServiceRef,
+    ops: Vec<DNSServiceRef>,
+}
+
+impl SharedConnection {
+    fn create() -> Result<Self, ServiceBrowseError> {
+        let mut shared = DNSServiceRef::default();
+        let err = unsafe { DNSServiceCreateConnection(&mut shared) };
+        if err != error::NO_ERROR {
+            return Err(ServiceBrowseError::BrowseFailed(format!(
+                "DNSServiceCreateConnection failed: {err}"
+            )));
+        }
+        Ok(Self {
+            shared,
+            ops: Vec::new(),
+        })
+    }
+
+    /// The descriptor to poll for all operations on this connection.
+    fn socket_fd(&self) -> Result<i32, ServiceBrowseError> {
+        let fd = unsafe { DNSServiceRefSockFD(self.shared.0) };
+        if fd < 0 {
+            return Err(ServiceBrowseError::BrowseFailed(
+                "DNSServiceRefSockFD returned an invalid descriptor".into(),
+            ));
+        }
+        Ok(fd)
+    }
+
+    /// Reads one queued reply and dispatches it to the owning callback.
+    fn process_result(&self) -> Result<(), ServiceBrowseError> {
+        let err = unsafe { DNSServiceProcessResult(self.shared.0) };
+        if err != error::NO_ERROR {
+            return Err(ServiceBrowseError::BrowseFailed(format!(
+                "DNSServiceProcessResult failed: {err}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Starts a browse that shares this connection, reporting to `ctx`.
+    ///
+    /// `ctx` must remain valid until this connection is torn down.
+    fn browse(
+        &mut self,
+        regtype: &str,
+        domain: &str,
+        interface: u32,
+        ctx: *mut c_void,
+    ) -> Result<(), ServiceBrowseError> {
+        let regtype_c = cstring(regtype)?;
+        let domain_c = if domain.is_empty() {
+            None // no domain: the daemon uses its default browse domains
+        } else {
+            Some(cstring(domain)?)
+        };
+
+        // Per the `kDNSServiceFlagsShareConnection` contract: copy the parent
+        // reference and hand the library the copy, which it initializes in place.
+        let mut op = DNSServiceRef(self.shared.0);
+        let err = unsafe {
+            DNSServiceBrowse(
+                &mut op,
+                FLAGS_SHARE_CONNECTION,
+                interface,
+                regtype_c.as_ptr(),
+                domain_c.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
+                Some(browse_callback),
+                ctx,
+            )
+        };
+        if err != error::NO_ERROR {
+            return Err(ServiceBrowseError::BrowseFailed(format!(
+                "DNSServiceBrowse failed for {regtype}: {err}"
+            )));
+        }
+        self.ops.push(op);
+        Ok(())
+    }
+}
+
+impl Drop for SharedConnection {
+    fn drop(&mut self) {
+        for op in self.ops.drain(..) {
+            // SAFETY: each op came from a successful `DNSServiceBrowse` on this
+            // connection and is deallocated exactly once, before the parent.
+            unsafe { DNSServiceRefDeallocate(op) };
+        }
+        // SAFETY: the parent came from a successful `DNSServiceCreateConnection`
+        // and is deallocated exactly once, after its operations. No callback can
+        // fire after this returns.
+        unsafe { DNSServiceRefDeallocate(DNSServiceRef(self.shared.0)) };
+    }
+}
+
+/// Runs every browse for one [`ServiceBrowser`](crate::ServiceBrowser) on a
+/// single thread over a single connection to the daemon.
+///
+/// The meta-query cascade can fan out to dozens of service types; giving each
+/// one its own connection and thread (as this used to) wastes a socket, a thread
+/// and a daemon client registration per type. `dns_sd.h` recommends a shared
+/// connection for exactly this case.
+fn run_pump(
     regtype: &str,
     domain: &str,
     interface: u32,
@@ -149,61 +261,47 @@ fn run_browse(
     handle: &Handle,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), ServiceBrowseError> {
-    let regtype_c = cstring(regtype)?;
-    let domain_c = if domain.is_empty() {
-        None
-    } else {
-        Some(cstring(domain)?)
-    };
-
-    let ctx = Box::new(BrowseThreadContext {
+    let state = Box::new(PumpState {
         tx: tx.clone(),
         handle: handle.clone(),
-        stop: stop.clone(),
-        is_meta,
         interface,
         seen: RefCell::new(HashSet::new()),
+        pending: RefCell::new(Vec::new()),
     });
-    let ctx_ptr = &*ctx as *const BrowseThreadContext as *mut c_void;
+    // The contexts borrow `state` and are handed to the daemon as raw pointers,
+    // so both must outlive `conn` (declared last, dropped first: no callback can
+    // fire once its operations are deallocated).
+    let meta_ctx = Box::new(OpContext {
+        state: &state,
+        is_meta: true,
+    });
+    let instance_ctx = Box::new(OpContext {
+        state: &state,
+        is_meta: false,
+    });
+    let meta_ctx_ptr = &*meta_ctx as *const OpContext<'_> as *mut c_void;
+    let instance_ctx_ptr = &*instance_ctx as *const OpContext<'_> as *mut c_void;
 
-    let mut sd_ref = DNSServiceRef::default();
-    let err = unsafe {
-        DNSServiceBrowse(
-            &mut sd_ref,
-            0,
-            interface,
-            regtype_c.as_ptr(),
-            domain_c.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
-            Some(browse_callback),
-            ctx_ptr,
-        )
+    let mut conn = SharedConnection::create()?;
+    let fd = conn.socket_fd()?;
+
+    let root_ctx = if is_meta {
+        meta_ctx_ptr
+    } else {
+        instance_ctx_ptr
     };
-    if err != error::NO_ERROR {
-        return Err(ServiceBrowseError::BrowseFailed(format!(
-            "DNSServiceBrowse failed for {regtype}: {err}"
-        )));
-    }
+    conn.browse(regtype, domain, interface, root_ctx)?;
 
-    let fd = unsafe { DNSServiceRefSockFD(sd_ref.0) };
-    if fd < 0 {
-        unsafe { DNSServiceRefDeallocate(sd_ref) };
-        return Err(ServiceBrowseError::BrowseFailed(
-            "DNSServiceRefSockFD returned an invalid descriptor".into(),
-        ));
-    }
-
-    let result = poll_loop(fd, sd_ref.0, stop);
-
-    unsafe { DNSServiceRefDeallocate(sd_ref) };
-    drop(ctx);
-    result
+    pump_loop(&mut conn, fd, &state, instance_ctx_ptr, stop)
 }
 
-/// Polls `fd` and dispatches results until the stop flag is set or an error
-/// occurs. `ctx` (referenced by the in-flight browse) must outlive this call.
-fn poll_loop(
+/// Polls the shared connection and dispatches replies until the stop flag is
+/// set, the daemon hangs up, or an error occurs.
+fn pump_loop(
+    conn: &mut SharedConnection,
     fd: i32,
-    sd: *mut _DNSServiceRef_t,
+    state: &PumpState,
+    instance_ctx_ptr: *mut c_void,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), ServiceBrowseError> {
     while !stop.load(Ordering::SeqCst) {
@@ -226,17 +324,31 @@ fn poll_loop(
             continue; // timeout: re-check the stop flag
         }
         if pfd.revents & libc::POLLIN != 0 {
-            let perr = unsafe { DNSServiceProcessResult(sd) };
-            if perr != error::NO_ERROR {
-                return Err(ServiceBrowseError::BrowseFailed(format!(
-                    "DNSServiceProcessResult failed: {perr}"
-                )));
-            }
+            conn.process_result()?;
+            start_pending_browses(conn, state, instance_ctx_ptr);
         } else if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
             break;
         }
     }
     Ok(())
+}
+
+/// Starts an instance browse for each service type the meta callback queued.
+///
+/// A type that cannot be browsed is reported and skipped: one bad type must not
+/// take down the browse of every other type sharing this connection.
+fn start_pending_browses(
+    conn: &mut SharedConnection,
+    state: &PumpState,
+    instance_ctx_ptr: *mut c_void,
+) {
+    // Collected first so the borrow is released before starting any browse.
+    let pending: Vec<(String, String)> = state.pending.borrow_mut().drain(..).collect();
+    for (service_type, domain) in pending {
+        if let Err(err) = conn.browse(&service_type, &domain, state.interface, instance_ctx_ptr) {
+            let _ = state.tx.send(Err(err));
+        }
+    }
 }
 
 unsafe extern "C" fn browse_callback(
@@ -249,12 +361,13 @@ unsafe extern "C" fn browse_callback(
     reply_domain: *const c_char,
     context: *mut c_void,
 ) {
-    // SAFETY: `context` points to the `BrowseThreadContext` owned by the browse
-    // thread that issued this operation; it outlives all callbacks.
-    let ctx = unsafe { &*(context as *const BrowseThreadContext) };
+    // SAFETY: `context` points to an `OpContext` owned by the pump thread that
+    // issued this operation; it outlives every callback for that operation.
+    let ctx = unsafe { &*(context as *const OpContext<'_>) };
+    let state = ctx.state;
 
     if error_code != error::NO_ERROR {
-        let _ = ctx.tx.send(Err(ServiceBrowseError::BrowseFailed(format!(
+        let _ = state.tx.send(Err(ServiceBrowseError::BrowseFailed(format!(
             "browse callback error: {error_code}"
         ))));
         return;
@@ -267,31 +380,32 @@ unsafe extern "C" fn browse_callback(
 
     if ctx.is_meta {
         // Meta-query result: the reply is a split-up service type, not an
-        // instance. Reconstruct it and start a per-type instance browse.
+        // instance. Reconstruct it and queue a per-type instance browse for the
+        // pump to start once this dispatch returns.
         if !is_add {
             return; // ignore service-type removals
         }
         let (service_type, child_domain) = meta_reply_to_type_and_domain(&name, &regtype, &domain);
-        if ctx
+        if state
             .seen
             .borrow_mut()
             .insert((service_type.clone(), child_domain.clone()))
         {
             trace!("discovered service type {service_type:?} in domain {child_domain:?}");
-            spawn_browse_thread(
-                service_type,
-                child_domain,
-                ctx.interface,
-                false,
-                ctx.tx.clone(),
-                ctx.handle.clone(),
-                ctx.stop.clone(),
-            );
+            state
+                .pending
+                .borrow_mut()
+                .push((service_type, child_domain));
         }
     } else if is_add {
-        // Resolve off-thread so the poll loop keeps dispatching.
-        let tx = ctx.tx.clone();
-        ctx.handle
+        // Resolve off-thread so the pump keeps dispatching. The resolve gets its
+        // own connection rather than sharing this one: resolves run concurrently
+        // on the blocking pool, and `dns_sd.h` leaves mutual exclusion for a
+        // shared reference to the caller (it would also make `MoreComing`
+        // collective, which is how the address lookup detects completion).
+        let tx = state.tx.clone();
+        state
+            .handle
             .spawn_blocking(move || resolve_service(name, regtype, domain, interface_index, tx));
     } else {
         let removed = RemovedService {
@@ -300,7 +414,7 @@ unsafe extern "C" fn browse_callback(
             domain: trim_dot(&domain),
             interface_index: NonZeroU32::new(interface_index),
         };
-        let _ = ctx.tx.send(Ok(BrowseEvent::Removed(removed)));
+        let _ = state.tx.send(Ok(BrowseEvent::Removed(removed)));
     }
 }
 
