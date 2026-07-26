@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS: browsing all service types (the default) found nothing.** The
+  service-type meta-query reports the domain inside `regtype` and sets the reply
+  domain to the DNS root (`.`); using the latter for the per-type browses asked
+  for each type in the root zone, which never reaches mDNS. Browsing an explicit
+  `service_type` was unaffected.
+
+### Changed
+
+- macOS: all browse operations for one `ServiceBrowser` now share a single
+  connection to `mDNSResponder` and a single thread, instead of one of each per
+  service type discovered.
+
 ### Added
 
 - `PartialEq`/`Eq` on `TxtRecord`.
@@ -14,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   soak run, plus security-audit and coverage-reporting workflows.
 - `rust-version` (MSRV) declaration and docs.rs builds for the Windows and
   macOS API surface.
+- Troubleshooting guide for empty browse results, covering the macOS 15 Local
+  Network privacy gate and how to get ground truth from the platform's own
+  discovery client.
+
+### Removed
+
+- Unused `network-interface` dev-dependency.
 
 ## [0.2.0] - 2026-07-02
 
