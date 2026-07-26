@@ -23,6 +23,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned rather than floating `nightly`: rustc 1.99.0-nightly (008fa22ce
+  # 2026-07-25) ICEs compiling tokio under `-Zsanitizer=address`
+  # ("not immediate: OperandRef(Uninit ...)", rustc_codegen_ssa
+  # mir/operand.rs:291), which fails every target at build time before any
+  # fuzzing runs. 2026-07-20 is verified to build the fuzz graph with the flags
+  # cargo-fuzz passes. Revisit and drop the pin once a newer nightly works.
+  # `scripts/fuzz.sh` reads this to pick the toolchain it drives cargo-fuzz with.
+  FUZZ_TOOLCHAIN: nightly-2026-07-20
 
 jobs:
   fuzz:
@@ -32,6 +40,8 @@ jobs:
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
 
       - name: Set up build environment
         uses: ./.github/actions/setup
