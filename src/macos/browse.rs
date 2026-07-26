@@ -118,8 +118,10 @@ struct BrowseThreadContext {
     is_meta: bool,
     /// Interface scope requested by the caller (0 = all). Used for child browses.
     interface: u32,
-    /// For meta browses: service types already seen, to avoid duplicate child browses.
-    seen: RefCell<HashSet<String>>,
+    /// For meta browses: `(service_type, domain)` pairs already seen, to avoid
+    /// duplicate child browses. The domain is part of the key because the same
+    /// type may be advertised in more than one domain.
+    seen: RefCell<HashSet<(String, String)>>,
 }
 
 fn spawn_browse_thread(
@@ -264,19 +266,21 @@ unsafe extern "C" fn browse_callback(
     let is_add = flags & FLAGS_ADD != 0;
 
     if ctx.is_meta {
-        // Meta-query result: `name` is the service label (e.g. "_http") and
-        // `regtype` is the transport + domain (e.g. "_tcp.local."). Reconstruct
-        // the full service type and start a per-type instance browse.
+        // Meta-query result: the reply is a split-up service type, not an
+        // instance. Reconstruct it and start a per-type instance browse.
         if !is_add {
             return; // ignore service-type removals
         }
-        let proto = first_label(&regtype);
-        let service_type = format!("{name}.{proto}");
-        if ctx.seen.borrow_mut().insert(service_type.clone()) {
-            trace!("discovered service type {service_type:?} in domain {domain:?}");
+        let (service_type, child_domain) = meta_reply_to_type_and_domain(&name, &regtype, &domain);
+        if ctx
+            .seen
+            .borrow_mut()
+            .insert((service_type.clone(), child_domain.clone()))
+        {
+            trace!("discovered service type {service_type:?} in domain {child_domain:?}");
             spawn_browse_thread(
                 service_type,
-                domain,
+                child_domain,
                 ctx.interface,
                 false,
                 ctx.tx.clone(),
@@ -533,34 +537,106 @@ unsafe fn cstr_to_string(p: *const c_char) -> String {
     unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
-/// Returns the first dot-separated label of `s` (e.g. `_tcp.local.` -> `_tcp`).
-fn first_label(s: &str) -> &str {
-    s.split('.').next().unwrap_or(s)
+/// Rebuilds the `(service_type, domain)` pair a service-type meta-query reply
+/// describes, so it can be fed back into [`DNSServiceBrowse`] as an ordinary
+/// per-type browse.
+///
+/// The meta-query (`_services._dns-sd._udp`) is answered with PTR records whose
+/// target is a service type, e.g. `_http._tcp.local.`. mDNSResponder splits that
+/// target with `DeconstructServiceName` as if it were a service *instance*
+/// name — first label as the instance, the **next two** labels as the type, the
+/// remainder as the domain — so the browse callback reports
+/// `name = "_http"`, `regtype = "_tcp.local."` and `reply_domain = "."`.
+///
+/// The reply domain is therefore the DNS root, not the domain the type lives in.
+/// Passing it back to `DNSServiceBrowse` asks for the type in the root zone (a
+/// unicast query that never reaches mDNS), which is why the domain has to be
+/// recovered from `regtype` instead: re-join the three parts and re-split them
+/// on the real DNS-SD boundary — the first two labels are the service type and
+/// what follows is the domain.
+///
+/// An empty returned domain means "the default browse domains", which is the
+/// right fallback when the reply carried no domain at all.
+fn meta_reply_to_type_and_domain(
+    name: &str,
+    regtype: &str,
+    reply_domain: &str,
+) -> (String, String) {
+    let mut full = format!("{name}.{regtype}");
+    // A reply domain of "." (or "") is the root and contributes no labels; any
+    // other value is a real suffix that `DeconstructServiceName` split off.
+    let suffix = reply_domain.trim_start_matches('.');
+    if !suffix.is_empty() {
+        if !full.ends_with('.') {
+            full.push('.');
+        }
+        full.push_str(suffix);
+    }
+
+    let labels: Vec<&str> = full.trim_end_matches('.').split('.').collect();
+    let service_type = labels.iter().take(2).copied().collect::<Vec<_>>().join(".");
+    let domain = labels.get(2..).map_or(String::new(), |rest| rest.join("."));
+    (service_type, domain)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The shape mDNSResponder actually reports for a `local.` service type: the
+    /// domain lives in `regtype`, and the reply domain is the DNS root.
     #[test]
-    fn first_label_returns_leading_segment() {
-        assert_eq!(first_label("_tcp.local."), "_tcp");
-        assert_eq!(first_label("_udp.example.com"), "_udp");
+    fn meta_reply_recovers_local_domain_from_regtype() {
+        let (service_type, domain) = meta_reply_to_type_and_domain("_http", "_tcp.local.", ".");
+        assert_eq!(service_type, "_http._tcp");
+        assert_eq!(domain, "local");
+    }
+
+    /// A root reply domain must never be browsed as if it were a real domain:
+    /// that queries the DNS root instead of mDNS and finds nothing.
+    #[test]
+    fn meta_reply_never_yields_a_root_domain() {
+        for reply_domain in [".", "", ".."] {
+            let (_, domain) = meta_reply_to_type_and_domain("_ipp", "_tcp.local.", reply_domain);
+            assert_eq!(domain, "local", "reply domain {reply_domain:?}");
+        }
     }
 
     #[test]
-    fn first_label_without_dot_returns_whole_string() {
-        assert_eq!(first_label("_tcp"), "_tcp");
+    fn meta_reply_handles_udp_types() {
+        let (service_type, domain) =
+            meta_reply_to_type_and_domain("_sleep-proxy", "_udp.local.", ".");
+        assert_eq!(service_type, "_sleep-proxy._udp");
+        assert_eq!(domain, "local");
     }
 
+    /// A multi-label domain is split across `regtype` and `reply_domain`, because
+    /// `DeconstructServiceName` takes exactly two labels for the type: for
+    /// `_http._tcp.example.com.` it reports type `_tcp.example.` and domain `com.`.
     #[test]
-    fn first_label_empty_string() {
-        assert_eq!(first_label(""), "");
+    fn meta_reply_rejoins_a_multi_label_domain() {
+        let (service_type, domain) =
+            meta_reply_to_type_and_domain("_http", "_tcp.example.", "com.");
+        assert_eq!(service_type, "_http._tcp");
+        assert_eq!(domain, "example.com");
     }
 
+    /// Nothing beyond the transport label: browse the default domains rather
+    /// than inventing one.
     #[test]
-    fn first_label_leading_dot_yields_empty() {
-        assert_eq!(first_label(".local"), "");
+    fn meta_reply_without_a_domain_falls_back_to_the_defaults() {
+        let (service_type, domain) = meta_reply_to_type_and_domain("_http", "_tcp.", ".");
+        assert_eq!(service_type, "_http._tcp");
+        assert_eq!(domain, "");
+    }
+
+    /// The reconstructed type is the string handed back to `DNSServiceBrowse`,
+    /// so it must survive the `CString` conversion the browse does.
+    #[test]
+    fn meta_reply_output_is_usable_as_a_browse_type() {
+        let (service_type, domain) = meta_reply_to_type_and_domain("_ssh", "_tcp.local.", ".");
+        assert_eq!(cstring(&service_type).unwrap().to_bytes(), b"_ssh._tcp");
+        assert_eq!(cstring(&domain).unwrap().to_bytes(), b"local");
     }
 
     #[test]
