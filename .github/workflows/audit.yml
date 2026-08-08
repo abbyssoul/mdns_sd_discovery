@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8
         with:
           tool: cargo-audit
 
