@@ -39,7 +39,7 @@ widestring = "1.2.1"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 futures-util = "0.3.32"
-zbus = { version = "5.15.0", features = ["tokio"] }
+zbus = { version = "6.0.0", features = ["tokio"] }
 
 [dev-dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

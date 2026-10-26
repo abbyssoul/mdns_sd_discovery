@@ -144,9 +144,9 @@ async fn connect_and_subscribe(
     let rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
         .sender("org.freedesktop.Avahi")
-        .and_then(|b| b.interface(interface))
-        .map_err(|err| ServiceBrowseError::BrowseFailed(err.to_string()))?
-        .build();
+        .interface(interface)
+        .build()
+        .map_err(|err| ServiceBrowseError::BrowseFailed(err.to_string()))?;
 
     let messages = MessageStream::for_match_rule(rule, &conn, None)
         .await
