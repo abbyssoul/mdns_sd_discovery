@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS: all browse operations for one `ServiceBrowser` now share a single
   connection to `mDNSResponder` and a single thread, instead of one of each per
   service type discovered.
+- Linux: upgraded `zbus` from 5 to 6. No public API change.
 
 ### Added
 

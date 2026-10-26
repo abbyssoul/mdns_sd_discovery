@@ -21,8 +21,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, MutexGuard};
 
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{connection, fdo, interface};
+use zbus::{OwnedObjectPath, connection, fdo, interface};
 
 use mdns_sd_discovery::{
     BrowseEvent, ServiceBrowseError, ServiceBrowser, ServiceBrowserBuilder, ServiceResolverBuilder,
@@ -222,11 +221,8 @@ where
 async fn serve_mock() -> zbus::Connection {
     let address = std::env::var("DBUS_SYSTEM_BUS_ADDRESS").expect("TestBus sets the address");
     connection::Builder::address(address.as_str())
-        .expect("valid bus address")
         .name("org.freedesktop.Avahi")
-        .expect("valid bus name")
         .serve_at("/", MockAvahi)
-        .expect("valid object path")
         .build()
         .await
         .expect("mock Avahi connects to the private bus")
