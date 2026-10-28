@@ -72,8 +72,12 @@ jobs:
       - name: Install cargo-edit
         if: steps.check.outputs.exists == 'false'
         uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389
+        # Pinned: cargo-edit is built with the repo toolchain (rust-toolchain.toml),
+        # which tracks the rustc Ubuntu PPA builders ship for kinjo. 0.13.14
+        # needs rustc 1.97; 0.13.13 is the last release that builds on 1.94.
+        # Bump only together with the toolchain.
         with:
-          tool: cargo-edit
+          tool: cargo-edit@0.13.13
 
       - name: Bump Cargo.toml to the requested version
         if: steps.check.outputs.exists == 'false'
